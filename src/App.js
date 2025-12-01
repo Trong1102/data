@@ -1,10 +1,10 @@
-import React, { useState, useEffect } from 'react';
-import { ShoppingCart, Search, Heart, User, MapPin, Monitor, Database, CheckCircle } from 'lucide-react';
+import React, { useState, useEffect, useRef } from 'react';
+import { ShoppingCart, Search, Heart, User, MapPin, Monitor, Database, CheckCircle, UserCheck, Clock } from 'lucide-react';
 import { db } from './firebase';
-import { collection, addDoc, serverTimestamp } from 'firebase/firestore';
+import { collection, addDoc, serverTimestamp, doc, updateDoc } from 'firebase/firestore';
+import { getUserId, getDeviceInfo, getUserProfile, isReturningUser, getUserSegment, trackUserVisit } from './userTracking';
 
 function App() {
-  // Database sản phẩm
   const products = [
     { id: 1, name: 'iPhone 15 Pro Max', price: 29990000, image: '📱', category: 'Điện thoại', rating: 4.8, sold: 1234 },
     { id: 2, name: 'Samsung Galaxy S24', price: 22990000, image: '📱', category: 'Điện thoại', rating: 4.7, sold: 987 },
@@ -25,74 +25,241 @@ function App() {
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedCategory, setSelectedCategory] = useState('Tất cả');
   const [userSession, setUserSession] = useState(null);
-  const [eventCount, setEventCount] = useState(0);
+  const [userId, setUserId] = useState(null);
+  const [userProfile, setUserProfile] = useState(null);
   const [savedCount, setSavedCount] = useState(0);
   const [saveStatus, setSaveStatus] = useState('');
+  const [sessionDuration, setSessionDuration] = useState(0);
+  const [isActive, setIsActive] = useState(true);
+  
+  const sessionDocRef = useRef(null);
+  const startTimeRef = useRef(Date.now());
+  const lastActivityRef = useRef(Date.now());
+  const activeTimeRef = useRef(0);
+  const inactiveTimeRef = useRef(0);
+  const durationIntervalRef = useRef(null);
 
-  // Khởi tạo session và lưu vào Firestore
+  // Format time for display
+  const formatDuration = (seconds) => {
+    const hrs = Math.floor(seconds / 3600);
+    const mins = Math.floor((seconds % 3600) / 60);
+    const secs = Math.floor(seconds % 60);
+    
+    if (hrs > 0) {
+      return `${hrs}:${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+    }
+    return `${mins}:${secs.toString().padStart(2, '0')}`;
+  };
+
+  // Track user activity
   useEffect(() => {
-    const initSession = async () => {
-      const sessionId = `session_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-      const deviceType = /Mobile|Android|iPhone/i.test(navigator.userAgent) ? 'Mobile' : 'PC';
-      const browser = navigator.userAgent.match(/(Chrome|Firefox|Safari|Edge|Opera)/)?.[1] || 'Unknown';
-      
-      const session = {
-        sessionId,
-        deviceType,
-        browser,
-        userAgent: navigator.userAgent,
-        screenResolution: `${window.screen.width}x${window.screen.height}`,
-        startTime: new Date().toISOString(),
-        location: 'Cầu Giấy, Hanoi, VN'
-      };
+    const handleActivity = () => {
+      setIsActive(true);
+      lastActivityRef.current = Date.now();
+    };
 
-      setUserSession(session);
+    const events = ['mousedown', 'mousemove', 'keypress', 'scroll', 'touchstart', 'click'];
+    events.forEach(event => {
+      document.addEventListener(event, handleActivity);
+    });
+
+    return () => {
+      events.forEach(event => {
+        document.removeEventListener(event, handleActivity);
+      });
+    };
+  }, []);
+
+  // Check for inactivity (5 minutes = 300000ms)
+  useEffect(() => {
+    const checkInactivity = setInterval(() => {
+      const timeSinceLastActivity = Date.now() - lastActivityRef.current;
+      if (timeSinceLastActivity > 300000) { // 5 minutes
+        setIsActive(false);
+      }
+    }, 1000);
+
+    return () => clearInterval(checkInactivity);
+  }, []);
+
+  // Update session duration every second
+  useEffect(() => {
+    durationIntervalRef.current = setInterval(() => {
+      const totalSeconds = Math.floor((Date.now() - startTimeRef.current) / 1000);
+      setSessionDuration(totalSeconds);
       
-      // Lưu session vào Firestore
+      // Track active vs inactive time
+      if (isActive) {
+        activeTimeRef.current += 1;
+      } else {
+        inactiveTimeRef.current += 1;
+      }
+    }, 1000);
+
+    return () => {
+      if (durationIntervalRef.current) {
+        clearInterval(durationIntervalRef.current);
+      }
+    };
+  }, [isActive]);
+
+  // Auto-save session duration every 30 seconds
+  useEffect(() => {
+    const autoSaveInterval = setInterval(() => {
+      if (sessionDocRef.current) {
+        updateSessionDuration();
+      }
+    }, 30000); // 30 seconds
+
+    return () => clearInterval(autoSaveInterval);
+  }, []);
+
+  // Update session duration in Firestore
+  const updateSessionDuration = async () => {
+    if (!sessionDocRef.current) return;
+
+    try {
+      const totalSeconds = Math.floor((Date.now() - startTimeRef.current) / 1000);
+      
+      await updateDoc(sessionDocRef.current, {
+        sessionDuration: totalSeconds,
+        activeTime: activeTimeRef.current,
+        inactiveTime: inactiveTimeRef.current,
+        lastUpdated: serverTimestamp(),
+        isActive: isActive
+      });
+      
+      console.log(`⏱️ Session duration updated: ${totalSeconds}s (Active: ${activeTimeRef.current}s, Inactive: ${inactiveTimeRef.current}s)`);
+    } catch (error) {
+      console.error('❌ Error updating session duration:', error);
+    }
+  };
+
+  // Khởi tạo user tracking và session
+  useEffect(() => {
+    const initUser = async () => {
       try {
-        await addDoc(collection(db, 'sessions'), {
+        const id = await getUserId();
+        setUserId(id);
+
+        const profile = getUserProfile(id);
+        setUserProfile(profile);
+
+        const deviceInfo = getDeviceInfo();
+
+        const sessionId = `session_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+        const session = {
+          sessionId,
+          userId: id,
+          userSegment: getUserSegment(),
+          isReturningUser: isReturningUser(),
+          visitCount: profile.totalVisits,
+          ...deviceInfo,
+          startTime: new Date().toISOString(),
+          location: 'Cầu Giấy, Hanoi, VN',
+          sessionDuration: 0,
+          activeTime: 0,
+          inactiveTime: 0,
+          isActive: true
+        };
+
+        setUserSession(session);
+        startTimeRef.current = Date.now();
+
+        await trackUserVisit(db, addDoc, collection, serverTimestamp);
+
+        // Save session to Firestore and keep reference
+        const docRef = await addDoc(collection(db, 'sessions'), {
           ...session,
           createdAt: serverTimestamp()
         });
-        console.log('✅ Session saved to Firestore');
-      } catch (error) {
-        console.error('❌ Error saving session:', error);
-      }
+        sessionDocRef.current = docRef;
 
-      // Track session start event
-      trackEvent('session_start', { sessionData: session });
+        console.log('✅ User initialized:', { userId: id, profile, session });
+
+        trackEvent('session_start', { 
+          sessionData: session,
+          userProfile: profile
+        });
+      } catch (error) {
+        console.error('❌ Error initializing user:', error);
+      }
     };
 
-    initSession();
+    initUser();
 
-    const handleBeforeUnload = () => {
-      if (userSession) {
+    // Save session duration when user leaves
+    const handleBeforeUnload = async (e) => {
+      if (userSession && sessionDocRef.current) {
+        const totalSeconds = Math.floor((Date.now() - startTimeRef.current) / 1000);
+        
+        // Track session end event
         trackEvent('session_end', { 
-          duration: (Date.now() - new Date(userSession.startTime).getTime()) / 1000 
+          duration: totalSeconds,
+          activeTime: activeTimeRef.current,
+          inactiveTime: inactiveTimeRef.current
         });
+
+        // Final update to session
+        await updateSessionDuration();
+
+        // Send beacon for guaranteed delivery
+        const data = JSON.stringify({
+          sessionId: userSession.sessionId,
+          userId: userId,
+          duration: totalSeconds,
+          activeTime: activeTimeRef.current,
+          inactiveTime: inactiveTimeRef.current,
+          endTime: new Date().toISOString()
+        });
+
+        navigator.sendBeacon('/api/session-end', data);
+      }
+    };
+
+    // Handle visibility change (tab switching)
+    const handleVisibilityChange = () => {
+      if (document.hidden) {
+        setIsActive(false);
+        updateSessionDuration();
+      } else {
+        setIsActive(true);
+        lastActivityRef.current = Date.now();
       }
     };
 
     window.addEventListener('beforeunload', handleBeforeUnload);
-    return () => window.removeEventListener('beforeunload', handleBeforeUnload);
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+
+    return () => {
+      window.removeEventListener('beforeunload', handleBeforeUnload);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      handleBeforeUnload();
+    };
   }, []);
 
   // Hàm theo dõi sự kiện và lưu vào Firestore
   const trackEvent = async (eventType, eventData) => {
+    const currentDuration = Math.floor((Date.now() - startTimeRef.current) / 1000);
+    
     const event = {
       eventType,
       timestamp: new Date().toISOString(),
       sessionId: userSession?.sessionId,
+      userId: userId,
       deviceType: userSession?.deviceType,
       browser: userSession?.browser,
+      os: userSession?.os,
       location: userSession?.location,
+      userSegment: userSession?.userSegment,
+      isReturningUser: userSession?.isReturningUser,
+      sessionDuration: currentDuration,
+      isActive: isActive,
       ...eventData
     };
 
-    setEventCount(prev => prev + 1);
     console.log('📊 Event tracked:', event);
 
-    // Lưu event vào Firestore
     try {
       setSaveStatus('saving');
       await addDoc(collection(db, 'analytics_events'), {
@@ -103,7 +270,6 @@ function App() {
       setSaveStatus('saved');
       console.log('✅ Event saved to Firestore');
       
-      // Reset status sau 2 giây
       setTimeout(() => setSaveStatus(''), 2000);
     } catch (error) {
       console.error('❌ Error saving event to Firestore:', error);
@@ -187,6 +353,26 @@ function App() {
   const categories = ['Tất cả', ...new Set(products.map(p => p.category))];
   const cartTotal = cart.reduce((sum, item) => sum + (item.price * item.quantity), 0);
 
+  const getSegmentColor = (segment) => {
+    switch(segment) {
+      case 'new_user': return 'bg-blue-500';
+      case 'occasional_user': return 'bg-green-500';
+      case 'regular_user': return 'bg-orange-500';
+      case 'power_user': return 'bg-purple-500';
+      default: return 'bg-gray-500';
+    }
+  };
+
+  const getSegmentLabel = (segment) => {
+    switch(segment) {
+      case 'new_user': return '🆕 Người dùng mới';
+      case 'occasional_user': return '👤 Thỉnh thoảng';
+      case 'regular_user': return '⭐ Thường xuyên';
+      case 'power_user': return '🔥 Siêu tích cực';
+      default: return 'Khách';
+    }
+  };
+
   return (
     <div className="min-h-screen bg-gray-50">
       {/* Header */}
@@ -195,9 +381,16 @@ function App() {
           <div className="flex items-center justify-between mb-3">
             <h1 className="text-2xl font-bold">🛒 ShopVN</h1>
             <div className="flex items-center gap-4">
+              {/* Session Duration Display */}
+              <div className="flex items-center gap-2 px-3 py-2 bg-white/20 rounded-lg">
+                <Clock size={20} />
+                <span className="font-mono font-bold">{formatDuration(sessionDuration)}</span>
+                <div className={`w-2 h-2 rounded-full ${isActive ? 'bg-green-400 animate-pulse' : 'bg-gray-400'}`}></div>
+              </div>
+              
               <div className="flex items-center gap-2 px-3 py-2 bg-white/20 rounded-lg">
                 <Database size={20} />
-                <span className="hidden sm:inline">Cloud DB</span>
+                <span className="hidden sm:inline">Cloud</span>
                 <div className="flex items-center gap-1">
                   <span className="bg-yellow-400 text-gray-900 text-xs px-2 py-0.5 rounded-full font-bold">
                     {savedCount}
@@ -244,7 +437,7 @@ function App() {
 
       {/* User Info Banner */}
       <div className="bg-blue-50 border-b border-blue-200 py-2">
-        <div className="max-w-7xl mx-auto px-4 flex flex-wrap items-center gap-4 text-sm text-gray-700">
+        <div className="max-w-7xl mx-auto px-4 flex flex-wrap items-center gap-3 text-sm">
           <div className="flex items-center gap-2">
             <Monitor size={16} />
             <span className="font-semibold">{userSession?.deviceType}</span>
@@ -257,9 +450,33 @@ function App() {
             <MapPin size={16} />
             <span className="font-semibold">{userSession?.location}</span>
           </div>
+          
+          {userProfile && (
+            <>
+              <div className="h-4 w-px bg-gray-300"></div>
+              <div className="flex items-center gap-2">
+                <UserCheck size={16} className="text-green-600" />
+                <span className="text-gray-600">Lần {userProfile.totalVisits}</span>
+              </div>
+              <div className={`${getSegmentColor(userSession?.userSegment)} text-white text-xs px-3 py-1 rounded-full font-semibold`}>
+                {getSegmentLabel(userSession?.userSegment)}
+              </div>
+            </>
+          )}
+          
+          <div className="h-4 w-px bg-gray-300"></div>
+          
+          {/* Active/Inactive Status */}
+          <div className="flex items-center gap-2">
+            <Clock size={16} className={isActive ? 'text-green-600' : 'text-gray-400'} />
+            <span className="text-gray-600">
+              Active: {formatDuration(activeTimeRef.current)} | Inactive: {formatDuration(inactiveTimeRef.current)}
+            </span>
+          </div>
+          
           <div className="ml-auto flex items-center gap-2 bg-green-100 px-3 py-1 rounded-full">
-            <span className="text-green-600 font-semibold">
-              ☁️ {savedCount} events đã lưu vào Cloud
+            <span className="text-green-600 font-semibold text-xs">
+              ☁️ {savedCount} events
             </span>
           </div>
         </div>
@@ -271,12 +488,15 @@ function App() {
           <div className="flex items-center justify-between">
             <div>
               <h3 className="font-bold text-lg mb-1 flex items-center gap-2">
-                <Database size={20} />
-                🎯 Analytics đang lưu vào Firebase Firestore!
+                <UserCheck size={20} />
+                {userSession?.isReturningUser ? '👋 Chào mừng bạn quay lại!' : '🎉 Chào mừng bạn lần đầu!'}
               </h3>
               <p className="text-sm opacity-90">
-                Mọi hành động của bạn được lưu real-time vào NoSQL cloud database. 
-                Truy cập Firebase Console để xem dữ liệu.
+                {userId && (
+                  <span className="mr-4">ID: {userId.slice(0, 30)}...</span>
+                )}
+                Thời gian: <span className="font-mono font-bold">{formatDuration(sessionDuration)}</span>
+                {' '}- {isActive ? '🟢 Đang hoạt động' : '🔴 Không hoạt động'}
               </p>
             </div>
             {saveStatus === 'saved' && (
