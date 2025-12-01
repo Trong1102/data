@@ -1,5 +1,7 @@
-import React, { useState, useEffect, useRef } from 'react';
-import { ShoppingCart, Search, Heart, User, MapPin, Monitor, Download } from 'lucide-react';
+import React, { useState, useEffect } from 'react';
+import { ShoppingCart, Search, Heart, User, MapPin, Monitor, Database, CheckCircle } from 'lucide-react';
+import { db } from './firebase';
+import { collection, addDoc, serverTimestamp } from 'firebase/firestore';
 
 function App() {
   // Database sản phẩm
@@ -16,7 +18,6 @@ function App() {
     { id: 10, name: 'Nintendo Switch', price: 7990000, image: '🎮', category: 'Gaming', rating: 4.7, sold: 1567 },
     { id: 11, name: 'Xiaomi Mi Band 8', price: 990000, image: '⌚', category: 'Đồng hồ', rating: 4.5, sold: 3421 },
     { id: 12, name: 'Logitech MX Master 3', price: 2490000, image: '🖱️', category: 'Phụ kiện', rating: 4.8, sold: 1234 },
-    { id: 12, name: 'Logitech MX Master 4', price: 2490000, image: '🖱️', category: 'Phụ kiện', rating: 4.8, sold: 1234 }
   ];
 
   const [cart, setCart] = useState([]);
@@ -24,14 +25,13 @@ function App() {
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedCategory, setSelectedCategory] = useState('Tất cả');
   const [userSession, setUserSession] = useState(null);
-  const [analytics, setAnalytics] = useState([]);
   const [eventCount, setEventCount] = useState(0);
-  
-  const analyticsRef = useRef([]);
+  const [savedCount, setSavedCount] = useState(0);
+  const [saveStatus, setSaveStatus] = useState('');
 
-  // Khởi tạo session và thu thập thông tin người dùng
+  // Khởi tạo session và lưu vào Firestore
   useEffect(() => {
-    const initSession = () => {
+    const initSession = async () => {
       const sessionId = `session_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
       const deviceType = /Mobile|Android|iPhone/i.test(navigator.userAgent) ? 'Mobile' : 'PC';
       const browser = navigator.userAgent.match(/(Chrome|Firefox|Safari|Edge|Opera)/)?.[1] || 'Unknown';
@@ -43,11 +43,23 @@ function App() {
         userAgent: navigator.userAgent,
         screenResolution: `${window.screen.width}x${window.screen.height}`,
         startTime: new Date().toISOString(),
-        location: 'Cầu Giấy, Hanoi, VN',
-        events: []
+        location: 'Cầu Giấy, Hanoi, VN'
       };
 
       setUserSession(session);
+      
+      // Lưu session vào Firestore
+      try {
+        await addDoc(collection(db, 'sessions'), {
+          ...session,
+          createdAt: serverTimestamp()
+        });
+        console.log('✅ Session saved to Firestore');
+      } catch (error) {
+        console.error('❌ Error saving session:', error);
+      }
+
+      // Track session start event
       trackEvent('session_start', { sessionData: session });
     };
 
@@ -58,8 +70,6 @@ function App() {
         trackEvent('session_end', { 
           duration: (Date.now() - new Date(userSession.startTime).getTime()) / 1000 
         });
-        // Tự động lưu file khi đóng trang
-        autoSaveAnalytics();
       }
     };
 
@@ -67,63 +77,39 @@ function App() {
     return () => window.removeEventListener('beforeunload', handleBeforeUnload);
   }, []);
 
-  // Tự động lưu file sau mỗi 10 events
-  useEffect(() => {
-    if (eventCount > 0 && eventCount % 10 === 0) {
-      autoSaveAnalytics();
-    }
-  }, [eventCount]);
-
-  // Hàm theo dõi sự kiện
-  const trackEvent = (eventType, eventData) => {
+  // Hàm theo dõi sự kiện và lưu vào Firestore
+  const trackEvent = async (eventType, eventData) => {
     const event = {
       eventType,
       timestamp: new Date().toISOString(),
       sessionId: userSession?.sessionId,
+      deviceType: userSession?.deviceType,
+      browser: userSession?.browser,
+      location: userSession?.location,
       ...eventData
     };
 
-    // Cập nhật state
-    setAnalytics(prev => [...prev, event]);
     setEventCount(prev => prev + 1);
-    
-    // Cập nhật ref để có data mới nhất
-    analyticsRef.current.push(event);
-    
     console.log('📊 Event tracked:', event);
-    console.log(`Total events: ${analyticsRef.current.length}`);
-  };
 
-  // Tự động lưu file analytics
-  const autoSaveAnalytics = () => {
+    // Lưu event vào Firestore
     try {
-      const data = {
-        userSession,
-        totalEvents: analyticsRef.current.length,
-        analytics: analyticsRef.current,
-        exportedAt: new Date().toISOString()
-      };
-
-      const dataStr = JSON.stringify(data, null, 2);
-      const dataBlob = new Blob([dataStr], { type: 'application/json' });
-      const url = URL.createObjectURL(dataBlob);
-      const link = document.createElement('a');
-      link.href = url;
-      link.download = `analytics_${userSession?.sessionId}_${Date.now()}.json`;
-      link.click();
-      URL.revokeObjectURL(url);
+      setSaveStatus('saving');
+      await addDoc(collection(db, 'analytics_events'), {
+        ...event,
+        createdAt: serverTimestamp()
+      });
+      setSavedCount(prev => prev + 1);
+      setSaveStatus('saved');
+      console.log('✅ Event saved to Firestore');
       
-      console.log('✅ Analytics auto-saved to file!');
-      console.log(`📊 Total events exported: ${analyticsRef.current.length}`);
+      // Reset status sau 2 giây
+      setTimeout(() => setSaveStatus(''), 2000);
     } catch (error) {
-      console.error('❌ Error auto-saving analytics:', error);
+      console.error('❌ Error saving event to Firestore:', error);
+      setSaveStatus('error');
+      setTimeout(() => setSaveStatus(''), 3000);
     }
-  };
-
-  // Nút tải xuống thủ công
-  const manualDownload = () => {
-    autoSaveAnalytics();
-    alert(`Đã tải xuống ${analyticsRef.current.length} events!`);
   };
 
   const handleProductView = (product) => {
@@ -209,17 +195,21 @@ function App() {
           <div className="flex items-center justify-between mb-3">
             <h1 className="text-2xl font-bold">🛒 ShopVN</h1>
             <div className="flex items-center gap-4">
-              <button
-                onClick={manualDownload}
-                className="flex items-center gap-2 px-3 py-2 bg-white/20 rounded-lg hover:bg-white/30 transition"
-                title="Tải xuống dữ liệu analytics"
-              >
-                <Download size={20} />
-                <span className="hidden sm:inline">Tải dữ liệu</span>
-                <span className="bg-yellow-400 text-gray-900 text-xs px-2 py-0.5 rounded-full font-bold">
-                  {eventCount}
-                </span>
-              </button>
+              <div className="flex items-center gap-2 px-3 py-2 bg-white/20 rounded-lg">
+                <Database size={20} />
+                <span className="hidden sm:inline">Cloud DB</span>
+                <div className="flex items-center gap-1">
+                  <span className="bg-yellow-400 text-gray-900 text-xs px-2 py-0.5 rounded-full font-bold">
+                    {savedCount}
+                  </span>
+                  {saveStatus === 'saved' && (
+                    <CheckCircle size={16} className="text-green-300 animate-pulse" />
+                  )}
+                  {saveStatus === 'saving' && (
+                    <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
+                  )}
+                </div>
+              </div>
               <div className="relative">
                 <Heart size={24} className="cursor-pointer hover:scale-110 transition" />
                 {favorites.length > 0 && (
@@ -268,8 +258,9 @@ function App() {
             <span className="font-semibold">{userSession?.location}</span>
           </div>
           <div className="ml-auto flex items-center gap-2 bg-green-100 px-3 py-1 rounded-full">
-            <span className="text-green-600 font-semibold">📊 {eventCount} events được ghi nhận</span>
-            <span className="text-xs text-gray-500">(Tự động lưu mỗi 10 events)</span>
+            <span className="text-green-600 font-semibold">
+              ☁️ {savedCount} events đã lưu vào Cloud
+            </span>
           </div>
         </div>
       </div>
@@ -279,18 +270,21 @@ function App() {
         <div className="mb-6 bg-gradient-to-r from-blue-500 to-purple-500 text-white p-4 rounded-lg shadow-lg">
           <div className="flex items-center justify-between">
             <div>
-              <h3 className="font-bold text-lg mb-1">🎯 Analytics đang hoạt động!</h3>
+              <h3 className="font-bold text-lg mb-1 flex items-center gap-2">
+                <Database size={20} />
+                🎯 Analytics đang lưu vào Firebase Firestore!
+              </h3>
               <p className="text-sm opacity-90">
-                Mọi hành động của bạn đều được ghi nhận. File JSON sẽ tự động tải xuống sau mỗi 10 events hoặc khi đóng trang.
+                Mọi hành động của bạn được lưu real-time vào NoSQL cloud database. 
+                Truy cập Firebase Console để xem dữ liệu.
               </p>
             </div>
-            <button
-              onClick={manualDownload}
-              className="px-4 py-2 bg-white text-blue-600 rounded-lg font-semibold hover:bg-blue-50 transition flex items-center gap-2"
-            >
-              <Download size={18} />
-              Tải ngay
-            </button>
+            {saveStatus === 'saved' && (
+              <div className="flex items-center gap-2 bg-green-500 px-4 py-2 rounded-lg">
+                <CheckCircle size={20} />
+                <span className="font-semibold">Đã lưu!</span>
+              </div>
+            )}
           </div>
         </div>
 
@@ -385,7 +379,7 @@ function App() {
                     total: cartTotal,
                     itemCount: cart.reduce((sum, item) => sum + item.quantity, 0)
                   });
-                  alert('🎉 Chức năng thanh toán đang phát triển!\n\n✅ Dữ liệu đã được ghi nhận vào Analytics.');
+                  alert('🎉 Chức năng thanh toán đang phát triển!\n\n✅ Dữ liệu đã được lưu vào Cloud Database.');
                 }}
                 className="px-6 py-3 bg-orange-500 text-white rounded-lg hover:bg-orange-600 transition font-semibold"
               >
